@@ -1,0 +1,38 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Env / credenciales
+.env
+.env.local
+.env.*.local
+
+# PM2 / logs
+logs/
+*.log
+*.pid
+*.seed
+*.pid.lock
+
+# Directorio de auth de Baileys (credenciales de WhatsApp)
+auth/
+sessions/
+tmp/
+cache/
+*.sqlite
+*.db
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Coverage / build
+coverage/
+dist/
+build/
