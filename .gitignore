@@ -22,7 +22,6 @@ logs/
 
 # Directorio de auth de Baileys (credenciales de WhatsApp)
 auth/
-sessions/
 tmp/
 cache/
 *.sqlite
