@@ -11,7 +11,7 @@
     "dev": "cross-env NODE_ENV=development node --watch src/server.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.20",
+    "baileys": "^7.0.0-rc.9",
     "bottleneck": "^2.19.5",
     "cors": "^2.8.5",
     "crypto": "^1.0.1",

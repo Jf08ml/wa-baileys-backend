@@ -3,7 +3,8 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   useMultiFileAuthState,
-} from "@whiskeysockets/baileys";
+  Browsers,
+} from "baileys";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
@@ -11,7 +12,7 @@ import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
 
 const SESSIONS = {}; // clientId -> sock
-const SESSION_STATE = {}; // clientId -> { status, reason, lastQrAt, lastReadyAt, me }
+const SESSION_STATE = {}; // clientId -> { status, reason, lastQrAt, lastReadyAt, me, pairingCode? }
 let BAILEYS_VERSION;
 const QR_TTL_MS = 20_000;
 
@@ -43,7 +44,12 @@ function emitStatus(io, clientId, code, reason = "") {
   io.to(clientId).emit("status", { code, reason, ts: Date.now() });
 }
 
-export async function getOrCreateClient({ clientId, io }) {
+/**
+ * Crea o reutiliza un socket Baileys
+ * - Si se pasa phoneNumber => intentamos pairing code
+ * - Si no => QR normal
+ */
+export async function getOrCreateClient({ clientId, io, phoneNumber }) {
   if (SESSIONS[clientId]) return SESSIONS[clientId];
 
   const authDir = path.join(env.AUTH_ROOT, clientId);
@@ -56,32 +62,82 @@ export async function getOrCreateClient({ clientId, io }) {
     auth: state,
     printQRInTerminal: false,
     syncFullHistory: false,
-    browser: ["ZybizoBackend", "Chrome", "1.0"],
+    browser: ["Ubuntu", "Chrome", "20.0.04"],
   });
 
   SESSIONS[clientId] = sock;
   setState(clientId, { status: "connecting", reason: "" });
   emitStatus(io, clientId, "connecting");
 
-  // persistir cada cambio de creds
+  // persistir creds
   sock.ev.on("creds.update", saveCreds);
 
-  // info "me" cuando esté disponible
+  // Info "me"
   (async () => {
     try {
-      // Baileys suele tener sock.user cuando abre
       if (sock.user) setState(clientId, { me: sock.user });
     } catch {}
   })();
 
-  // eventos de conexión
+  // --- VARIABLES DE CONTROL LOCALES ---
   let lastQrEmitted = null;
   let lastQrSeq = 0;
+  // 1. Definimos la bandera aquí para que exista en el closure
+  let pairingRequested = false;
 
-  sock.ev.on("connection.update", (u) => {
+  // --- EVENTO PRINCIPAL ---
+  sock.ev.on("connection.update", async (u) => {
+    // 2. Extraemos las variables 'qr' y 'connection' del evento
     const { connection, lastDisconnect, qr } = u;
 
-    if (qr && qr !== lastQrEmitted) {
+    // ------------------ LÓGICA DE PAIRING CODE (MOVIDA AQUÍ) ------------------
+    // Se ejecuta cuando:
+    // a) Tenemos un phoneNumber
+    // b) Recibimos un QR (significa que el socket conectó a WA y espera auth)
+    // c) No estamos registrados aún
+    // d) No hemos pedido el código ya
+    if (
+      qr &&
+      phoneNumber &&
+      !pairingRequested &&
+      !sock.authState?.creds?.registered
+    ) {
+      pairingRequested = true; // Marcamos para no repetir
+      const normalized = String(phoneNumber).replace(/\D/g, "");
+
+      logger.info(
+        `[${clientId}] Solicitando pairing code para ${normalized}...`
+      );
+
+      // Esperamos un momento para asegurar estabilidad del socket antes de pedir
+      setTimeout(async () => {
+        try {
+          const code = await sock.requestPairingCode(normalized);
+          const pretty = code?.match(/.{1,4}/g)?.join("-") || code || "";
+
+          setState(clientId, { pairingCode: pretty });
+
+          io.to(clientId).emit("pairing_code", {
+            code: pretty,
+            raw: code,
+            phone: normalized,
+          });
+
+          logger.info(`[${clientId}] Pairing code: ${pretty}`);
+        } catch (e) {
+          pairingRequested = false; // Permitir reintento si falla
+          logger.error(`[${clientId}] Error pairing code: ${e.message}`);
+          io.to(clientId).emit("pairing_error", { error: e.message });
+        }
+      }, 2000);
+    }
+    // ---------------- FIN LÓGICA DE PAIRING CODE ----------------
+
+    // --- LÓGICA DE QR TRADICIONAL (Solo si NO estamos usando pairing) ---
+    // Si usas pairing, generalmente ignoras mostrar el QR al usuario,
+    // pero si quieres soportar ambos, puedes dejarlo.
+    if (qr && qr !== lastQrEmitted && !phoneNumber) {
+      // <-- Sugerencia: !phoneNumber para no mezclar UI
       lastQrSeq += 1;
       const issuedAt = Date.now();
       const expiresAt = issuedAt + QR_TTL_MS;
@@ -106,10 +162,6 @@ export async function getOrCreateClient({ clientId, io }) {
         replacesPrevious,
         qrId,
       });
-
-      logger.info(
-        `[${clientId}] QR #${seq} (${qrId}) emitido; reemplaza=${replacesPrevious}`
-      );
     }
 
     if (connection === "open") {
@@ -127,22 +179,15 @@ export async function getOrCreateClient({ clientId, io }) {
         willReconnect ? "reconnecting" : "disconnected",
         String(code || "")
       );
-      logger.warn(
-        `[${clientId}] closed code=${code} reconnect=${willReconnect}`
-      );
+
       if (willReconnect) {
         setTimeout(() => {
-          // recrear socket
           delete SESSIONS[clientId];
-          getOrCreateClient({ clientId, io }).catch(() => {});
+          getOrCreateClient({ clientId, io, phoneNumber }).catch(() => {}); // Pasamos phoneNumber al reconectar
         }, 1500);
       }
     }
   });
-
-  // vista rápida para admin (opcional)
-  globalThis.__SESSIONS_VIEW = globalThis.__SESSIONS_VIEW || {};
-  globalThis.__SESSIONS_VIEW[clientId] = { startedAt: Date.now() };
 
   return sock;
 }
@@ -198,6 +243,7 @@ export async function logoutClient(clientId, io) {
   if (globalThis.__SESSIONS_VIEW) delete globalThis.__SESSIONS_VIEW[clientId];
 }
 
+// sendMessageSafe se queda igual
 export async function sendMessageSafe(clientId, { phone, message, image }) {
   const sock = getClient(clientId);
   if (!sock) throw new Error("Sesión no encontrada");
@@ -241,5 +287,4 @@ export async function sendMessageSafe(clientId, { phone, message, image }) {
   return { id: r.key?.id, kind: "text" };
 }
 
-// Exporta helpers para admin routes
 export const __state = { getState, getSessionView, SESSIONS };

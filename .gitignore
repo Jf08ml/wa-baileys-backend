@@ -35,3 +35,6 @@ Thumbs.db
 coverage/
 dist/
 build/
+
+# sessions-test
+auth_sessions
