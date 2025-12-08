@@ -15,6 +15,7 @@ import sessionRoutes from "./routes/sessionRoutes.js";
 import messageRoutes from "./routes/messageRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import bulkRoutes from "./routes/bulkRoutes.js";
+import reminderJob from "./jobs/reminderJob.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -155,4 +156,6 @@ app.use((err, _req, res, _next) => {
 // --- Arrancar ---
 httpServer.listen(env.PORT, () => {
   console.log(`🚀 API lista en http://localhost:${env.PORT}`);
+
+  reminderJob();
 });
