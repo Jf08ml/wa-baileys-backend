@@ -50,6 +50,18 @@ export function resetDailyCounters() {
   dailyCount.clear();
 }
 
+export function getDailyStats(clientId) {
+  const used = getDaily(clientId);
+  const limit = DAILY_CAP_PER_CLIENT;
+  return {
+    clientId,
+    used,
+    limit,
+    remaining: Math.max(0, limit - used),
+    percentage: limit > 0 ? Math.round((used / limit) * 100) : 0,
+  };
+}
+
 // Cola/limiters por clientId
 const perClientLimiter = new Map();
 function getLimiter(clientId) {

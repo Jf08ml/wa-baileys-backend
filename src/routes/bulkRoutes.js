@@ -6,6 +6,7 @@ import {
   getBulk,
   cancelBulk,
   consent,
+  getDailyStats,
 } from "../bulk/bulkManager.js";
 
 const router = Router();
@@ -65,6 +66,12 @@ router.post("/bulk/optout", (req, res) => {
 });
 router.get("/bulk/consent", (_req, res) => {
   res.json({ optIn: consent.getOptInAll(), optOut: consent.getOptOutAll() });
+});
+
+// Consultar límite diario de un cliente
+router.get("/bulk/daily-limit/:clientId", (req, res) => {
+  const stats = getDailyStats(req.params.clientId);
+  res.json(stats);
 });
 
 export default router;
