@@ -16,6 +16,32 @@ import messageRoutes from "./routes/messageRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import bulkRoutes from "./routes/bulkRoutes.js";
 import reminderJob from "./jobs/reminderJob.js";
+import { logger } from "./utils/logger.js";
+
+// --- Blindaje global del proceso ---
+// NO hacemos process.exit: PM2 gestiona el ciclo de vida.
+// El objetivo es loggear y sobrevivir, no matar el proceso.
+process.on("unhandledRejection", (reason, _promise) => {
+  const mem = process.memoryUsage();
+  logger.error("unhandledRejection — promesa sin .catch()", {
+    reason: reason?.message ?? String(reason),
+    stack: reason?.stack ?? "",
+    memHeapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
+    ts: new Date().toISOString(),
+  });
+});
+
+process.on("uncaughtException", (err, origin) => {
+  const mem = process.memoryUsage();
+  logger.error("uncaughtException — excepción no capturada", {
+    message: err?.message ?? String(err),
+    stack: err?.stack ?? "",
+    origin,
+    memHeapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
+    ts: new Date().toISOString(),
+  });
+  // NO process.exit — dejar que PM2 gestione reinicios si es necesario
+});
 
 const app = express();
 app.set("trust proxy", 1);
@@ -149,7 +175,11 @@ io.on("connection", (socket) => {
 
 // --- Fallback error handler ---
 app.use((err, _req, res, _next) => {
-  console.error("Express error:", err);
+  logger.error("Express error handler", {
+    message: err?.message ?? String(err),
+    stack: err?.stack ?? "",
+    ts: new Date().toISOString(),
+  });
   res.status(500).json({ error: err?.message || "Server error" });
 });
 
