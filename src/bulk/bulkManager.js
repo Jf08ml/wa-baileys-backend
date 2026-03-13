@@ -39,6 +39,17 @@ function normalizePhone(p) {
 // Estado por campaña
 const BULKS = new Map(); // bulkId -> { meta, items[], stats, status, createdAt }
 
+// Limpia campañas terminadas con más de 4 horas de antigüedad para liberar memoria
+function cleanupOldBulks() {
+  const cutoff = Date.now() - 4 * 60 * 60 * 1000;
+  const terminal = new Set(["done", "error", "cancelled"]);
+  for (const [id, b] of BULKS) {
+    if (terminal.has(b.status) && b.createdAt < cutoff) {
+      BULKS.delete(id);
+    }
+  }
+}
+
 function getDaily(clientId) {
   return dailyCount.get(clientId) || 0;
 }
@@ -74,6 +85,16 @@ function getLimiter(clientId) {
     perClientLimiter.set(clientId, limiter);
   }
   return perClientLimiter.get(clientId);
+}
+
+// Libera el limiter si el clientId no tiene campañas activas
+function _maybeReleaseLimiter(clientId) {
+  const hasRunning = Array.from(BULKS.values()).some(
+    (b) => b.meta.clientId === clientId && b.status === “running”
+  );
+  if (!hasRunning) {
+    perClientLimiter.delete(clientId);
+  }
 }
 
 // API pública para opt-in/out
@@ -160,6 +181,8 @@ export async function startBulk({
     }
     prepared.push({ phone, vars: it.vars || {}, skip: false });
   }
+
+  cleanupOldBulks();
 
   const bulk = {
     meta: { bulkId, clientId, title: title || `Bulk ${bulkId}` },
@@ -289,9 +312,13 @@ export async function startBulk({
         stats: bulk.stats,
       });
     }
+    bulk.items = []; // liberar array de contactos de la memoria
+    _maybeReleaseLimiter(clientId);
   })().catch((e) => {
     bulk.status = "error";
+    bulk.items = []; // liberar aunque haya error
     emit(io, clientId, bulkId, "error", { error: String(e?.message || e) });
+    _maybeReleaseLimiter(clientId);
   });
 
   return { bulkId, prepared: prepared.length };
