@@ -6,7 +6,7 @@ import { logger } from "../utils/logger.js";
 
 const nanoid = customAlphabet("123456789ABCDEFGHJKLMNPQRSTUVWXYZ", 10);
 
-// Config “conservadora” (ajusta según warming-up del número)
+// Config "conservadora" (ajusta según warming-up del número)
 const BASE_MIN_DELAY_MS = 6000; // 6s
 const BASE_MAX_DELAY_MS = 10000; // 10s
 const DAILY_CAP_PER_CLIENT = 400; // límite diario por línea (ajústalo bajo)
@@ -78,7 +78,7 @@ const perClientLimiter = new Map();
 function getLimiter(clientId) {
   if (!perClientLimiter.has(clientId)) {
     const limiter = new Bottleneck({
-      minTime: BASE_MIN_DELAY_MS, // base, pero usaremos señales “jittered” manuales
+      minTime: BASE_MIN_DELAY_MS, // base, pero usaremos señales "jittered" manuales
       maxConcurrent: 1,
       reservoir: 999999, // no usamos aquí, controlamos por lógica
     });
@@ -87,10 +87,10 @@ function getLimiter(clientId) {
   return perClientLimiter.get(clientId);
 }
 
-// Libera el limiter si el clientId no tiene campañas activas
+// Libera el limiter si el clientId no tiene campanas activas
 function _maybeReleaseLimiter(clientId) {
   const hasRunning = Array.from(BULKS.values()).some(
-    (b) => b.meta.clientId === clientId && b.status === “running”
+    (b) => b.meta.clientId === clientId && b.status === "running"
   );
   if (!hasRunning) {
     perClientLimiter.delete(clientId);
