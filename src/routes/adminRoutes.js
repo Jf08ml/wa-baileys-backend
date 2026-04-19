@@ -1,6 +1,6 @@
 import { Router } from "express";
 import os from "os";
-import { __state } from "../sessions/baileysManager.js";
+import { __state, getAllSessions, deleteSessionFiles } from "../sessions/baileysManager.js";
 import { getRecentLogs } from "../utils/logBuffer.js";
 
 const router = Router();
@@ -29,10 +29,15 @@ router.get("/status/:clientId", (req, res) => {
 });
 
 router.get("/sessions", (_req, res) => {
-  const all = Object.keys(__state.SESSIONS).map((id) =>
-    __state.getSessionView(id)
-  );
-  res.json(all);
+  res.json(getAllSessions());
+});
+
+router.delete("/session/:clientId", (req, res) => {
+  const { clientId } = req.params;
+  if (!clientId) return res.status(400).json({ error: "Falta clientId" });
+  const result = deleteSessionFiles(clientId);
+  if (!result.ok) return res.status(400).json({ error: result.reason });
+  res.json({ status: "deleted", clientId });
 });
 
 router.get("/metrics", (_req, res) => {

@@ -328,13 +328,76 @@ export function getClient(clientId) {
 
 export function getSessionView(clientId) {
   const st = getState(clientId);
+
+  // Fecha de creación del creds.json = momento en que se escaneó el QR o se usó pairing code.
+  // Las reconexiones no modifican este archivo, solo un logout + nuevo vínculo lo recrea.
+  let linkedAt = 0;
+  try {
+    const credsPath = path.join(env.AUTH_ROOT, clientId, "creds.json");
+    linkedAt = fs.statSync(credsPath).birthtimeMs;
+  } catch {}
+
   return {
     clientId,
     status: st.status,
     reason: st.reason || "",
     lastReadyAt: st.lastReadyAt || 0,
     lastQrAt: st.lastQrAt || 0,
+    linkedAt,
   };
+}
+
+/**
+ * Retorna todas las sesiones: las activas en memoria + las que tienen creds.json
+ * en disco pero no están conectadas (huérfanas o desconectadas tras 401).
+ */
+export function getAllSessions() {
+  const result = {};
+
+  // 1. Sesiones activas en memoria
+  for (const clientId of Object.keys(SESSIONS)) {
+    result[clientId] = getSessionView(clientId);
+  }
+
+  // 2. Sesiones con credenciales en disco que no están en memoria
+  try {
+    const dirs = fs.readdirSync(env.AUTH_ROOT, { withFileTypes: true });
+    for (const d of dirs) {
+      if (!d.isDirectory()) continue;
+      const clientId = d.name;
+      if (result[clientId]) continue; // ya está incluida
+      const credsPath = path.join(env.AUTH_ROOT, clientId, "creds.json");
+      if (!fs.existsSync(credsPath)) continue;
+      result[clientId] = getSessionView(clientId); // status será "disconnected"
+    }
+  } catch (e) {
+    logger.error("[session] error escaneando AUTH_ROOT", { error: e?.message });
+  }
+
+  return Object.values(result);
+}
+
+/**
+ * Elimina los archivos de credenciales del disco para una sesión desconectada.
+ * No permite borrar sesiones activas.
+ */
+export function deleteSessionFiles(clientId) {
+  if (SESSIONS[clientId]) {
+    return { ok: false, reason: "La sesión está activa. Haz logout primero." };
+  }
+  const dir = path.join(env.AUTH_ROOT, clientId);
+  if (!fs.existsSync(dir)) {
+    return { ok: false, reason: "No existe directorio para este clientId." };
+  }
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+    delete SESSION_STATE[clientId];
+    logger.info("[session] archivos de sesión eliminados desde monitor", { clientId });
+    return { ok: true };
+  } catch (e) {
+    logger.error("[session] error eliminando archivos de sesión", { clientId, error: e?.message });
+    return { ok: false, reason: e?.message };
+  }
 }
 
 export async function restartClient(clientId, io) {
