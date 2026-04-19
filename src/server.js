@@ -16,6 +16,7 @@ import messageRoutes from "./routes/messageRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import bulkRoutes from "./routes/bulkRoutes.js";
 import reminderJob from "./jobs/reminderJob.js";
+import { reconnectPersistedSessions } from "./sessions/baileysManager.js";
 import { logger } from "./utils/logger.js";
 
 // --- Blindaje global del proceso ---
@@ -188,4 +189,8 @@ httpServer.listen(env.PORT, () => {
   console.log(`🚀 API lista en http://localhost:${env.PORT}`);
 
   reminderJob();
+
+  // Reconectar sesiones que tenían credenciales al momento del último reinicio.
+  // Se retrasa 3 s para que Socket.IO termine de inicializarse antes de emitir eventos.
+  setTimeout(() => reconnectPersistedSessions(io), 3_000);
 });

@@ -415,4 +415,49 @@ export async function sendMessageSafe(clientId, { phone, message, image }) {
   return { id: r.key?.id, kind: "text" };
 }
 
+/**
+ * Al arrancar el servidor, reconecta todas las sesiones que tienen credenciales
+ * persistidas en disco (creds.json). Así los reinicios de PM2 no dejan sesiones
+ * huérfanas — las credentials en AUTH_ROOT sobreviven al proceso, el socket no.
+ */
+export async function reconnectPersistedSessions(io) {
+  if (!fs.existsSync(env.AUTH_ROOT)) return;
+
+  let entries;
+  try {
+    entries = fs.readdirSync(env.AUTH_ROOT, { withFileTypes: true });
+  } catch (e) {
+    logger.error("[session] no se pudo leer AUTH_ROOT al iniciar", { error: e?.message });
+    return;
+  }
+
+  const clientIds = entries
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name)
+    .filter((id) =>
+      fs.existsSync(path.join(env.AUTH_ROOT, id, "creds.json"))
+    );
+
+  if (clientIds.length === 0) {
+    logger.info("[session] sin sesiones persistidas para reconectar al arranque");
+    return;
+  }
+
+  logger.info("[session] reconectando sesiones persistidas", {
+    count: clientIds.length,
+    clientIds,
+  });
+
+  for (const clientId of clientIds) {
+    // Escalonar las reconexiones para no saturar la CPU/red al arrancar
+    await new Promise((r) => setTimeout(r, 2_000));
+    getOrCreateClient({ clientId, io }).catch((e) => {
+      logger.error("[session] error reconectando sesión persistida", {
+        clientId,
+        error: e?.message,
+      });
+    });
+  }
+}
+
 export const __state = { getState, getSessionView, SESSIONS };
