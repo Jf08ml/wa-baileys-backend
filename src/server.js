@@ -17,6 +17,7 @@ import adminRoutes from "./routes/adminRoutes.js";
 import bulkRoutes from "./routes/bulkRoutes.js";
 import reminderJob from "./jobs/reminderJob.js";
 import { reconnectPersistedSessions } from "./sessions/baileysManager.js";
+import { setIo } from "./utils/logBuffer.js";
 import { logger } from "./utils/logger.js";
 
 // --- Blindaje global del proceso ---
@@ -147,6 +148,9 @@ app.use((req, _res, next) => {
   req.io = io;
   next();
 });
+
+// Conectar logBuffer con Socket.IO para streaming de logs al monitor
+setIo(io);
 
 // --- Rutas API (protegidas) ---
 app.use("/api", sessionRoutes);

@@ -79,7 +79,7 @@ function getState(clientId) {
 
 function emitStatus(io, clientId, code, reason = "") {
   setState(clientId, { status: code, reason });
-  io.to(clientId).emit("status", { code, reason, ts: Date.now() });
+  io.to(clientId).emit("status", { clientId, code, reason, ts: Date.now() });
 }
 
 /**
@@ -240,7 +240,7 @@ async function _doCreate({ clientId, io, phoneNumber }) {
         setState(clientId, { lastQrAt: issuedAt });
         emitStatus(io, clientId, "waiting_qr");
         io.to(clientId).emit("qr", {
-          qr, issuedAt, expiresAt, ttlMs: QR_TTL_MS, seq, replacesPrevious, qrId,
+          clientId, qr, issuedAt, expiresAt, ttlMs: QR_TTL_MS, seq, replacesPrevious, qrId,
         });
       }
 
