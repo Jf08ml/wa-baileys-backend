@@ -83,6 +83,22 @@ function emitStatus(io, clientId, code, reason = "") {
 }
 
 /**
+ * Reenvía un mensaje al backend de AgenditApp para que el agente lo procese.
+ * Fire-and-forget: el caller debe manejar el .catch() — nunca await aquí.
+ */
+async function forwardToAgent(payload) {
+  if (!env.AGENDITAPP_BACKEND_URL || !env.WA_AGENT_SECRET) return;
+  await fetch(`${env.AGENDITAPP_BACKEND_URL}/api/wa-agent/message`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-WA-Agent-Secret": env.WA_AGENT_SECRET,
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
  * Corre `promise` con un timeout en ms.
  * Protege sendMessage de cuelgues indefinidos (FASE 6).
  */
@@ -312,6 +328,47 @@ async function _doCreate({ clientId, io, phoneNumber }) {
         error: e?.message,
         stack: e?.stack,
       });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // LISTENER: messages.upsert — reenvío al agente AgenditApp
+  // -------------------------------------------------------------------------
+  sock.ev.on("messages.upsert", ({ messages, type }) => {
+    if (type !== "notify") return;
+    if (!env.AGENDITAPP_BACKEND_URL || !env.WA_AGENT_SECRET) return;
+
+    const meId = getState(clientId).me?.id;
+    const orgPhone = meId
+      ? "+" + meId.replace(/@s\.whatsapp\.net$/, "").replace(/:\d+$/, "")
+      : null;
+
+    for (const msg of messages) {
+      // remoteJidAlt tiene el JID telefónico cuando WhatsApp usa direccionamiento LID (@lid)
+      const jid = msg.key?.remoteJidAlt || msg.key?.remoteJid;
+      if (!jid || jid.endsWith("@g.us")) continue;
+
+      const text =
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        null;
+      if (!text) continue;
+
+      const clientPhone = "+" + jid.replace("@s.whatsapp.net", "");
+
+      forwardToAgent({
+        clientId,
+        orgPhone,
+        clientPhone,
+        fromMe: Boolean(msg.key.fromMe),
+        body: text,
+        timestamp: Number(msg.messageTimestamp),
+      }).catch((err) =>
+        logger.warn("[agent] error al reenviar mensaje al backend", {
+          clientId,
+          error: err?.message,
+        })
+      );
     }
   });
 

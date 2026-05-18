@@ -20,4 +20,8 @@ export const env = {
     .filter(Boolean),
   LOG_LEVEL: process.env.LOG_LEVEL || "info",
   AUTH_ROOT: process.env.AUTH_ROOT || "/opt/wa/auth",
+
+  // WA Agent (AgenditApp) — opcional; si no están definidas el forwarding se omite
+  AGENDITAPP_BACKEND_URL: process.env.AGENDITAPP_BACKEND_URL || "",
+  WA_AGENT_SECRET: process.env.WA_AGENT_SECRET || "",
 };
