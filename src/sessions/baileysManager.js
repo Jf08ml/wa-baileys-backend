@@ -88,14 +88,21 @@ function emitStatus(io, clientId, code, reason = "") {
  */
 async function forwardToAgent(payload) {
   if (!env.AGENDITAPP_BACKEND_URL || !env.WA_AGENT_SECRET) return;
-  await fetch(`${env.AGENDITAPP_BACKEND_URL}/api/wa-agent/message`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-WA-Agent-Secret": env.WA_AGENT_SECRET,
-    },
-    body: JSON.stringify(payload),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5_000);
+  try {
+    await fetch(`${env.AGENDITAPP_BACKEND_URL}/api/wa-agent/message`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-WA-Agent-Secret": env.WA_AGENT_SECRET,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
