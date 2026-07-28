@@ -1,7 +1,6 @@
 // src/sessions/baileysManager.js
 import makeWASocket, {
   DisconnectReason,
-  fetchLatestBaileysVersion,
   useMultiFileAuthState,
   Browsers,
 } from "baileys";
@@ -122,11 +121,16 @@ function withTimeout(promise, ms) {
 // Versión Baileys
 // ---------------------------------------------------------------------------
 
+// Build de WA Web fijada manualmente: fetchLatestBaileysVersion() puede devolver
+// builds nuevas que WhatsApp rechaza con 405 "Connection Failure" al registrar
+// dispositivos nuevos (bug reportado en WhiskeySockets/Baileys#2370). Se fija una
+// build estable confirmada por la comunidad hasta que se resuelva upstream.
+const PINNED_WA_VERSION = [2, 3000, 1033893291];
+
 export async function initBaileysVersion() {
   if (!BAILEYS_VERSION) {
-    const { version } = await fetchLatestBaileysVersion();
-    BAILEYS_VERSION = version;
-    logger.info("[session] Baileys version negociada", { version: BAILEYS_VERSION.join(".") });
+    BAILEYS_VERSION = PINNED_WA_VERSION;
+    logger.info("[session] Baileys version fijada (workaround 405)", { version: BAILEYS_VERSION.join(".") });
   }
   return BAILEYS_VERSION;
 }
@@ -174,7 +178,10 @@ async function _doCreate({ clientId, io, phoneNumber }) {
     auth: state,
     printQRInTerminal: false,
     syncFullHistory: false,
-    browser: ["Ubuntu", "Chrome", "20.0.04"],
+    // Fingerprint inválido (["Ubuntu","Chrome","20.0.04"], versión de OS inexistente) contribuía
+    // al 405 "Connection Failure" en registros nuevos — se usa un fingerprint válido y probado
+    // por la comunidad (WhiskeySockets/Baileys#2370).
+    browser: Browsers.windows("Chrome"),
   });
 
   SESSIONS[clientId] = sock;
