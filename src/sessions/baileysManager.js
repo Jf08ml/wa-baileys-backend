@@ -2,7 +2,6 @@
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
-  Browsers,
 } from "baileys";
 import fs from "fs";
 import path from "path";
@@ -57,6 +56,40 @@ function deleteAuthDir(clientId) {
   }
 }
 
+// Pool de fingerprints [os, browser, osVersion] — evita Linux/Ubuntu (más asociado
+// a bots/farms por la protección anti-abuso de WhatsApp) y evita reusar siempre el
+// mismo fingerprint desde la misma IP, lo cual es en sí una señal de tráfico no humano.
+const BROWSER_FINGERPRINT_POOL = [
+  ["Windows", "Chrome", "10.0.19045"],
+  ["Windows", "Chrome", "10.0.22631"],
+  ["Windows", "Edge", "10.0.22631"],
+  ["Mac OS", "Chrome", "14.4.1"],
+  ["Mac OS", "Chrome", "13.6.6"],
+  ["Mac OS", "Safari", "17.4.1"],
+];
+
+/**
+ * Devuelve el fingerprint de navegador para `clientId`, eligiendo uno al azar la
+ * primera vez y persistiéndolo junto a las credenciales — debe mantenerse estable
+ * entre reconexiones de una misma sesión ya vinculada (cambiarlo en cada reconexión
+ * sería, otra vez, una señal de bot).
+ */
+function getBrowserFingerprint(clientId, authDir) {
+  const filePath = path.join(authDir, "fingerprint.json");
+  try {
+    const saved = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    if (Array.isArray(saved) && saved.length === 3) return saved;
+  } catch {}
+
+  const picked = BROWSER_FINGERPRINT_POOL[Math.floor(Math.random() * BROWSER_FINGERPRINT_POOL.length)];
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(picked));
+  } catch (e) {
+    logger.warn("[session] no se pudo persistir el fingerprint de navegador", { clientId, error: e?.message });
+  }
+  return picked;
+}
+
 function getBackoffDelay(clientId) {
   const attempt = BACKOFF.get(clientId) || 0;
   const delay = BACKOFF_DELAYS[Math.min(attempt, BACKOFF_DELAYS.length - 1)];
@@ -72,7 +105,7 @@ function setState(clientId, patch) {
   SESSION_STATE[clientId] = { ...(SESSION_STATE[clientId] || {}), ...patch };
 }
 
-function getState(clientId) {
+export function getState(clientId) {
   return SESSION_STATE[clientId] || { status: "disconnected" };
 }
 
@@ -178,14 +211,14 @@ async function _doCreate({ clientId, io, phoneNumber }) {
     auth: state,
     printQRInTerminal: false,
     syncFullHistory: false,
-    // Fingerprint inválido (["Ubuntu","Chrome","20.0.04"], versión de OS inexistente) contribuía
-    // al 405 "Connection Failure" en registros nuevos — se usa un fingerprint válido y probado
-    // por la comunidad (WhiskeySockets/Baileys#2370).
-    browser: Browsers.windows("Chrome"),
+    // Fingerprint aleatorio (y estable por sesión, ver getBrowserFingerprint) — un
+    // fingerprint fijo ["Ubuntu","Chrome","20.0.04"] con versión de OS inexistente
+    // contribuía al 405 "Connection Failure" en registros nuevos (WhiskeySockets/Baileys#2370).
+    browser: getBrowserFingerprint(clientId, authDir),
   });
 
   SESSIONS[clientId] = sock;
-  setState(clientId, { status: "connecting", reason: "" });
+  setState(clientId, { status: "connecting", reason: "", lastQrPayload: null, lastPairingPayload: null });
   emitStatus(io, clientId, "connecting");
 
   // Capturar "me" si ya está disponible al momento de crear
@@ -239,8 +272,9 @@ async function _doCreate({ clientId, io, phoneNumber }) {
           try {
             const code = await sock.requestPairingCode(normalized);
             const pretty = code?.match(/.{1,4}/g)?.join("-") || code || "";
-            setState(clientId, { pairingCode: pretty });
-            io.to(clientId).emit("pairing_code", { code: pretty, raw: code, phone: normalized });
+            const pairingPayload = { code: pretty, raw: code, phone: normalized };
+            setState(clientId, { pairingCode: pretty, lastPairingPayload: pairingPayload });
+            io.to(clientId).emit("pairing_code", pairingPayload);
             logger.info("[session] pairing code emitido", { clientId, code: pretty });
           } catch (e) {
             pairingRequested = false; // permitir reintento si falla
@@ -267,17 +301,23 @@ async function _doCreate({ clientId, io, phoneNumber }) {
           .slice(0, 8);
 
         lastQrEmitted = qr;
-        setState(clientId, { lastQrAt: issuedAt });
-        emitStatus(io, clientId, "waiting_qr");
-        io.to(clientId).emit("qr", {
+        const qrPayload = {
           clientId, qr, issuedAt, expiresAt, ttlMs: QR_TTL_MS, seq, replacesPrevious, qrId,
-        });
+        };
+        setState(clientId, { lastQrAt: issuedAt, lastQrPayload: qrPayload });
+        emitStatus(io, clientId, "waiting_qr");
+        io.to(clientId).emit("qr", qrPayload);
       }
 
       // --- Conexión abierta ---
       if (connection === "open") {
         resetBackoff(clientId); // reconexión exitosa → contador de backoff a cero
-        setState(clientId, { lastReadyAt: Date.now(), me: sock.user || null });
+        setState(clientId, {
+          lastReadyAt: Date.now(),
+          me: sock.user || null,
+          lastQrPayload: null,
+          lastPairingPayload: null,
+        });
         emitStatus(io, clientId, "ready");
         logger.info("[session] sesión ready", { clientId });
       }

@@ -16,7 +16,7 @@ import messageRoutes from "./routes/messageRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import bulkRoutes from "./routes/bulkRoutes.js";
 import reminderJob from "./jobs/reminderJob.js";
-import { reconnectPersistedSessions } from "./sessions/baileysManager.js";
+import { reconnectPersistedSessions, getState } from "./sessions/baileysManager.js";
 import { setIo } from "./utils/logBuffer.js";
 import { logger } from "./utils/logger.js";
 
@@ -159,12 +159,28 @@ app.use("/api", adminRoutes);
 app.use("/api", bulkRoutes);
 
 // --- Socket.IO rooms por clientId ---
+// Al unirse, el socket recién llega y puede haberse perdido eventos ya emitidos
+// (QR, pairing code) mientras completaba el handshake — sobre todo en producción,
+// donde el join tarda más que en local y puede llegar después de que Baileys ya
+// emitió el primer QR. Por eso se reenvía el último estado conocido al unirse.
+function syncCurrentState(socket, clientId) {
+  const st = getState(clientId);
+  socket.emit("status", { code: st.status || "connecting", reason: st.reason || "", me: st.me, ts: Date.now() });
+
+  if (st.status === "waiting_qr" && st.lastQrPayload && st.lastQrPayload.expiresAt > Date.now()) {
+    socket.emit("qr", st.lastQrPayload);
+  }
+  if (st.lastPairingPayload) {
+    socket.emit("pairing_code", st.lastPairingPayload);
+  }
+}
+
 io.on("connection", (socket) => {
   const tokenClientId = socket.data.ws?.clientId;
   if (tokenClientId) {
     // Auto-join usando el clientId del JWT
     socket.join(tokenClientId);
-    socket.emit("status", { code: "connecting", ts: Date.now() });
+    syncCurrentState(socket, tokenClientId);
   } else {
     // Fallback: permite 'join' manual (valida que no contradiga el JWT si existiera)
     socket.on("join", ({ clientId }) => {
@@ -173,7 +189,7 @@ io.on("connection", (socket) => {
         return; // ignora intentos cruzados
       }
       socket.join(clientId);
-      socket.emit("status", { code: "connecting", ts: Date.now() });
+      syncCurrentState(socket, clientId);
     });
   }
 });
