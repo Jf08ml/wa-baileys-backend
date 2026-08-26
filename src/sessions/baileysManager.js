@@ -2,6 +2,7 @@
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
+  WAMessageStatus,
 } from "baileys";
 import fs from "fs";
 import path from "path";
@@ -17,6 +18,34 @@ const SESSION_STATE = {};   // clientId -> { status, reason, lastQrAt, lastReady
 const CREATING = new Map(); // clientId -> Promise  — MUTEX anti-socket-duplicado
 const DESTROYING = new Set(); // clientIds en destrucción intencional — bloquea reconexión automática
 const BACKOFF = new Map();  // clientId -> número de intento actual (backoff exponencial)
+
+// clientId -> Map<messageId, { errorCode, ts }> — acks de error (ej. "463"
+// account restricted) que WhatsApp envía de forma ASÍNCRONA después de que
+// sock.sendMessage() ya resolvió con éxito (el socket solo confirma que el
+// mensaje se puso en curso, no que WhatsApp lo haya aceptado de verdad).
+// bulkManager.js consulta esto tras un breve margen para no contar como
+// "enviado" un mensaje que en realidad fue rechazado.
+const MESSAGE_ACK_ERRORS = new Map();
+const ACK_ERROR_TTL_MS = 5 * 60 * 1000;
+
+function recordAckError(clientId, messageId, errorCode) {
+  if (!MESSAGE_ACK_ERRORS.has(clientId)) MESSAGE_ACK_ERRORS.set(clientId, new Map());
+  MESSAGE_ACK_ERRORS.get(clientId).set(messageId, { errorCode, ts: Date.now() });
+}
+
+export function getAckError(clientId, messageId) {
+  return MESSAGE_ACK_ERRORS.get(clientId)?.get(messageId) || null;
+}
+
+setInterval(() => {
+  const cutoff = Date.now() - ACK_ERROR_TTL_MS;
+  for (const [clientId, byMsg] of MESSAGE_ACK_ERRORS) {
+    for (const [msgId, v] of byMsg) {
+      if (v.ts < cutoff) byMsg.delete(msgId);
+    }
+    if (byMsg.size === 0) MESSAGE_ACK_ERRORS.delete(clientId);
+  }
+}, 60_000).unref();
 
 let BAILEYS_VERSION;
 const QR_TTL_MS = 20_000;
@@ -386,6 +415,27 @@ async function _doCreate({ clientId, io, phoneNumber }) {
   });
 
   // -------------------------------------------------------------------------
+  // LISTENER: messages.update — capturar acks de error (ej. 463 "account
+  // restricted") que llegan async DESPUÉS de que sendMessage() ya resolvió.
+  // Sin esto, un bulk send puede contar como "sent" un mensaje que WhatsApp
+  // rechazó en el acto (ver baileysManager.js#getAckError / bulkManager.js).
+  // -------------------------------------------------------------------------
+  sock.ev.on("messages.update", (updates) => {
+    for (const u of updates || []) {
+      if (u.update?.status !== WAMessageStatus.ERROR) continue;
+      const messageId = u.key?.id;
+      const errorCode = u.update?.messageStubParameters?.[0];
+      if (!messageId) continue;
+      recordAckError(clientId, messageId, errorCode);
+      logger.warn("[session] ack de error recibido para mensaje enviado", {
+        clientId,
+        messageId,
+        errorCode,
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // LISTENER: messages.upsert — reenvío al agente AgenditApp
   // -------------------------------------------------------------------------
   sock.ev.on("messages.upsert", ({ messages, type }) => {
@@ -565,8 +615,12 @@ export async function sendMessageSafe(clientId, { phone, message, image }) {
   if (image) {
     if (typeof image === "string" && image.startsWith("http")) {
       // withTimeout protege contra URLs externas que cuelguen indefinidamente (FASE 6)
+      // linkPreview: null evita que Baileys intente generar preview del caption
+      // (usa link-preview-js, dependencia con SSRF conocido sin parche — ver
+      // GHSA-4gp8-rjrq-ch6q — y que además puede fallar/tardar sin bloquear el
+      // envío, solo dejando ruido en logs).
       const r = await withTimeout(
-        sock.sendMessage(jid, { image: { url: image }, caption: message || undefined }),
+        sock.sendMessage(jid, { image: { url: image }, caption: message || undefined, linkPreview: null }),
         30_000
       );
       return { id: r.key?.id, kind: "image_url" };
@@ -577,7 +631,7 @@ export async function sendMessageSafe(clientId, { phone, message, image }) {
       const mimetype = m[1];
       const buffer = Buffer.from(m[2], "base64");
       const r = await withTimeout(
-        sock.sendMessage(jid, { image: buffer, mimetype, caption: message || undefined }),
+        sock.sendMessage(jid, { image: buffer, mimetype, caption: message || undefined, linkPreview: null }),
         30_000
       );
       return { id: r.key?.id, kind: "image_base64" };
@@ -585,7 +639,12 @@ export async function sendMessageSafe(clientId, { phone, message, image }) {
     throw new Error("Formato de imagen no soportado");
   }
 
-  const r = await withTimeout(sock.sendMessage(jid, { text: message }), 30_000);
+  // linkPreview: null desactiva la generación de preview (link-preview-js) —
+  // ver nota de seguridad arriba. Nuestras plantillas suelen incluir enlaces
+  // (cancelación, gestión de cita, sitio del negocio) y sin esto cada envío
+  // con URL disparaba un fetch externo de hasta 3s que siempre fallaba en
+  // producción (dependencia no resuelta) sin bloquear el envío, solo ruido.
+  const r = await withTimeout(sock.sendMessage(jid, { text: message, linkPreview: null }), 30_000);
   return { id: r.key?.id, kind: "text" };
 }
 

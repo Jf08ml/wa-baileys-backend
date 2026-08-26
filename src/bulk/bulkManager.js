@@ -1,7 +1,7 @@
 // src/bulk/bulkManager.js
 import Bottleneck from "bottleneck";
 import { customAlphabet } from "nanoid";
-import { sendMessageSafe } from "../sessions/baileysManager.js";
+import { sendMessageSafe, getAckError } from "../sessions/baileysManager.js";
 import { logger } from "../utils/logger.js";
 
 const nanoid = customAlphabet("123456789ABCDEFGHJKLMNPQRSTUVWXYZ", 10);
@@ -12,6 +12,16 @@ const BASE_MAX_DELAY_MS = 10000; // 10s
 const DAILY_CAP_PER_CLIENT = 400; // límite diario por línea (ajústalo bajo)
 const MAX_RETRIES = 2; // reintentos leves
 const QUIET_HOURS = null; // desactívalo para probar
+
+// sendMessageSafe() resuelve apenas el socket acepta el mensaje — el rechazo
+// real de WhatsApp (ej. 463 "account restricted") llega después, de forma
+// asíncrona, vía el ack. Sin este margen, un bulk contaba como "sent" un
+// mensaje que WhatsApp rechazó al instante (caso real: LZ NAILS, agenda-app).
+const ACK_CONFIRM_WAIT_MS = 5000;
+// 463 = WhatsApp bloqueando iniciar un chat nuevo con ese contacto. Reintentar
+// cuenta como otro "reach out" y empeora la restricción (ver comentario en
+// baileys/lib/Socket/messages-recv.js) — nunca reintentar, solo blacklistear.
+const RESTRICTED_ERROR_CODES = new Set(["463"]);
 
 // Listas (migrables a DB)
 const optInSet = new Set(); // "57300..." (E.164 sin '+')
@@ -251,11 +261,36 @@ export async function startBulk({
         // Intentos con backoff sencillo
         for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
           try {
-            await sendMessageSafe(clientId, {
+            const { id: messageId } = await sendMessageSafe(clientId, {
               phone: it.phone,
               message: text,
               image,
             });
+
+            // Margen para que llegue un ack de error asíncrono (ej. 463)
+            // antes de contar el mensaje como realmente enviado.
+            await sleep(ACK_CONFIRM_WAIT_MS);
+            const ackError = messageId ? getAckError(clientId, messageId) : null;
+
+            if (ackError && RESTRICTED_ERROR_CODES.has(String(ackError.errorCode))) {
+              // WhatsApp rechazó el mensaje — no es un "sent" y no se reintenta
+              // (reintentar empeora la restricción). Se blacklistea el contacto
+              // para que ningún otro bulk (campañas, cumpleaños, etc.) insista.
+              blacklistSet.add(it.phone);
+              it.skip = true;
+              it.skipReason = `wa_restricted_${ackError.errorCode}`;
+              bulk.stats.skipped++;
+              emit(io, clientId, bulkId, "skipped", {
+                index: i,
+                phone: it.phone,
+                reason: it.skipReason,
+              });
+              logger.warn(
+                `[bulk ${bulkId}] mensaje a ${it.phone} rechazado por WhatsApp (${ackError.errorCode}) — no se reintenta`
+              );
+              return;
+            }
+
             bulk.stats.sent++;
             incDaily(clientId);
             emit(io, clientId, bulkId, "sent", { index: i, phone: it.phone });
