@@ -189,7 +189,7 @@ export async function startBulk({
       prepared.push({ phone, skip: true, skipReason: "blacklisted" });
       continue;
     }
-    prepared.push({ phone, vars: it.vars || {}, skip: false });
+    prepared.push({ phone, vars: it.vars || {}, skip: false, externalRef: it.externalRef });
   }
 
   cleanupOldBulks();
@@ -265,6 +265,7 @@ export async function startBulk({
               phone: it.phone,
               message: text,
               image,
+              externalRef: it.externalRef,
             });
 
             // Margen para que llegue un ack de error asíncrono (ej. 463)

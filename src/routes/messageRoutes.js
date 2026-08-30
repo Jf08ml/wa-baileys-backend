@@ -4,7 +4,7 @@ import { getClient, sendMessageSafe } from "../sessions/baileysManager.js";
 const router = Router();
 
 router.post("/send", async (req, res) => {
-  const { clientId, phone, message, image } = req.body || {};
+  const { clientId, phone, message, image, externalRef } = req.body || {};
   if (!clientId || !phone || (!message && !image)) {
     return res
       .status(400)
@@ -13,7 +13,7 @@ router.post("/send", async (req, res) => {
   const client = getClient(clientId);
   if (!client) return res.status(404).json({ error: "Sesión no encontrada" });
   try {
-    const result = await sendMessageSafe(clientId, { phone, message, image });
+    const result = await sendMessageSafe(clientId, { phone, message, image, externalRef });
     res.json({ status: "sent", ...result });
   } catch (e) {
     res.status(500).json({ error: e.message || String(e) });

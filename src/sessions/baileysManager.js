@@ -47,6 +47,66 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
+// clientId -> Map<messageId, { externalRef, ts }> — correlación entre un
+// mensaje enviado y la referencia externa del caller (ej. "confirmation:<id>"
+// o "reminder:<id1>,<id2>"), para poder reenviarle el ack real de entrega
+// (SERVER_ACK/DELIVERY_ACK) cuando llegue. TTL más largo que el de errores:
+// un DELIVERY_ACK puede tardar horas si el destinatario está sin señal.
+const MESSAGE_CONTEXT = new Map();
+const MESSAGE_CONTEXT_TTL_MS = 6 * 60 * 60 * 1000;
+
+function setMessageContext(clientId, messageId, externalRef) {
+  if (!messageId || !externalRef) return;
+  if (!MESSAGE_CONTEXT.has(clientId)) MESSAGE_CONTEXT.set(clientId, new Map());
+  MESSAGE_CONTEXT.get(clientId).set(messageId, { externalRef, ts: Date.now() });
+}
+
+function getMessageContext(clientId, messageId) {
+  return MESSAGE_CONTEXT.get(clientId)?.get(messageId) || null;
+}
+
+setInterval(() => {
+  const cutoff = Date.now() - MESSAGE_CONTEXT_TTL_MS;
+  for (const [clientId, byMsg] of MESSAGE_CONTEXT) {
+    for (const [msgId, v] of byMsg) {
+      if (v.ts < cutoff) byMsg.delete(msgId);
+    }
+    if (byMsg.size === 0) MESSAGE_CONTEXT.delete(clientId);
+  }
+}, 5 * 60_000).unref();
+
+// SERVER_ACK (✓, aceptado por el server de WA) / DELIVERY_ACK (✓✓, entregado
+// al dispositivo) / ERROR → estados simples que le interesan al backend de
+// AgenditApp para depurar entregas reales. READ/PLAYED se ignoran a propósito.
+const DELIVERY_STATUS_BY_ACK = {
+  [WAMessageStatus.SERVER_ACK]: "sent",
+  [WAMessageStatus.DELIVERY_ACK]: "delivered",
+  [WAMessageStatus.ERROR]: "failed",
+};
+
+/**
+ * Reenvía el status real de entrega de un mensaje al backend de AgenditApp.
+ * Fire-and-forget, mismo patrón/timeout que forwardToAgent.
+ */
+async function forwardStatusToBackend(payload) {
+  if (!env.AGENDITAPP_BACKEND_URL || !env.WA_AGENT_SECRET) return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5_000);
+  try {
+    await fetch(`${env.AGENDITAPP_BACKEND_URL}/api/wa-agent/status`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-WA-Agent-Secret": env.WA_AGENT_SECRET,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 let BAILEYS_VERSION;
 const QR_TTL_MS = 20_000;
 
@@ -422,16 +482,40 @@ async function _doCreate({ clientId, io, phoneNumber }) {
   // -------------------------------------------------------------------------
   sock.ev.on("messages.update", (updates) => {
     for (const u of updates || []) {
-      if (u.update?.status !== WAMessageStatus.ERROR) continue;
       const messageId = u.key?.id;
-      const errorCode = u.update?.messageStubParameters?.[0];
       if (!messageId) continue;
-      recordAckError(clientId, messageId, errorCode);
-      logger.warn("[session] ack de error recibido para mensaje enviado", {
-        clientId,
+
+      if (u.update?.status === WAMessageStatus.ERROR) {
+        const errorCode = u.update?.messageStubParameters?.[0];
+        recordAckError(clientId, messageId, errorCode);
+        logger.warn("[session] ack de error recibido para mensaje enviado", {
+          clientId,
+          messageId,
+          errorCode,
+        });
+      }
+
+      // Tracking real de entrega (ver MESSAGE_CONTEXT arriba) — solo reenvía si
+      // este mensaje fue registrado con un externalRef al enviarse (envío
+      // individual o bulk de reminders/confirmaciones); el resto de statuses
+      // de messages.update (ej. mensajes de otro dispositivo de la misma
+      // cuenta) se ignora sin costo, no matchea nada en el mapa.
+      const deliveryStatus = DELIVERY_STATUS_BY_ACK[u.update?.status];
+      if (!deliveryStatus) continue;
+      const ctx = getMessageContext(clientId, messageId);
+      if (!ctx) continue;
+
+      forwardStatusToBackend({
+        externalRef: ctx.externalRef,
+        status: deliveryStatus,
         messageId,
-        errorCode,
-      });
+      }).catch((err) =>
+        logger.warn("[session] error al reenviar status de entrega al backend", {
+          clientId,
+          messageId,
+          error: err?.message,
+        })
+      );
     }
   });
 
@@ -596,7 +680,7 @@ export async function logoutClient(clientId, io) {
   }
 }
 
-export async function sendMessageSafe(clientId, { phone, message, image }) {
+export async function sendMessageSafe(clientId, { phone, message, image, externalRef }) {
   const sock = getClient(clientId);
   if (!sock) throw new Error("Sesión no encontrada");
 
@@ -612,6 +696,11 @@ export async function sendMessageSafe(clientId, { phone, message, image }) {
     ? clean
     : `${clean}@s.whatsapp.net`;
 
+  const track = (result) => {
+    if (externalRef && result?.id) setMessageContext(clientId, result.id, externalRef);
+    return result;
+  };
+
   if (image) {
     if (typeof image === "string" && image.startsWith("http")) {
       // withTimeout protege contra URLs externas que cuelguen indefinidamente (FASE 6)
@@ -623,7 +712,7 @@ export async function sendMessageSafe(clientId, { phone, message, image }) {
         sock.sendMessage(jid, { image: { url: image }, caption: message || undefined, linkPreview: null }),
         30_000
       );
-      return { id: r.key?.id, kind: "image_url" };
+      return track({ id: r.key?.id, kind: "image_url" });
     }
     if (typeof image === "string" && image.startsWith("data:")) {
       const m = image.match(/^data:(.+);base64,(.+)$/);
@@ -634,7 +723,7 @@ export async function sendMessageSafe(clientId, { phone, message, image }) {
         sock.sendMessage(jid, { image: buffer, mimetype, caption: message || undefined, linkPreview: null }),
         30_000
       );
-      return { id: r.key?.id, kind: "image_base64" };
+      return track({ id: r.key?.id, kind: "image_base64" });
     }
     throw new Error("Formato de imagen no soportado");
   }
@@ -645,7 +734,7 @@ export async function sendMessageSafe(clientId, { phone, message, image }) {
   // con URL disparaba un fetch externo de hasta 3s que siempre fallaba en
   // producción (dependencia no resuelta) sin bloquear el envío, solo ruido.
   const r = await withTimeout(sock.sendMessage(jid, { text: message, linkPreview: null }), 30_000);
-  return { id: r.key?.id, kind: "text" };
+  return track({ id: r.key?.id, kind: "text" });
 }
 
 /**
